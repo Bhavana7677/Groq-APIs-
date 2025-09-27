@@ -1,0 +1,191 @@
+import os
+import json
+from openai import OpenAI
+from typing import List, Dict, Union, Optional
+
+# --------------------------------------------------------------------------------------
+# ⚠️ WARNING: REPLACE 'YOUR_GROQ_API_KEY' with your actual key for the evaluator
+# --------------------------------------------------------------------------------------
+# For professional use, use: client = OpenAI(api_key=os.environ.get("GROQ_API_KEY"), base_url="https://api.groq.com/openai/v1")
+# For this assignment's requirement:
+GROQ_API_KEY = "gsk_rd3kKwqTbPiupVsAE"  
+client = OpenAI(api_key=GROQ_API_KEY, base_url="https://api.groq.com/openai/v1")
+
+GROQ_MODEL = "gemma-7b-it"
+
+# --------------------------------------------------------------------------------------
+# 1. Main Conversation Manager Class
+# --------------------------------------------------------------------------------------
+
+class ConversationManager:
+    """Manages conversation history and performs periodic summarization."""
+    
+    def __init__(self, k: int = 5, max_turns: Optional[int] = None, max_chars: Optional[int] = None):
+        """
+        :param k: Summarize after every k conversation turns (user + assistant = 2 turns).
+        :param max_turns: Hard limit the number of turns to keep.
+        :param max_chars: Hard limit the total character length of the conversation.
+        """
+        self.history: List[Dict[str, str]] = []
+        self.k = k
+        self.max_turns = max_turns
+        self.max_chars = max_chars
+        self.turn_count = 0
+
+    def get_history(self) -> List[Dict[str, str]]:
+        """Returns the current conversation history."""
+        return self.history
+
+    def add_message(self, role: str, content: str):
+        """Adds a message to the history and increments turn count for 'user' messages."""
+        self.history.append({"role": role, "content": content})
+        if role == "user":
+            self.turn_count += 1
+            
+    def _summarize_history(self):
+        """Internal method to call the Groq API for summarization."""
+        print("\n--- Performing Summarization via Groq API ---")
+        
+        # Build a string of the current history to summarize
+        history_text = "\n".join([f"{msg['role'].title()}: {msg['content']}" for msg in self.history])
+        
+        # The system message guides the summarization task
+        summarization_prompt = (
+            "You are an expert summarization bot. Review the following conversation history "
+            "and create a single, concise summary that captures all key topics and outcomes. "
+            "Do not exceed 100 words. Start with 'SUMMARY:'"
+        )
+        
+        messages = [
+            {"role": "system", "content": summarization_prompt},
+            {"role": "user", "content": f"Please summarize this chat history:\n\n{history_text}"}
+        ]
+
+        try:
+            chat_completion = client.chat.completions.create(
+                model=GROQ_MODEL,
+                messages=messages,
+                temperature=0.0,
+            )
+            summary = chat_completion.choices[0].message.content
+            print(f"✅ Summary generated: {summary[:100]}...") # Truncate for display
+            
+            # Replace the old history with a concise summary entry
+            self.history = [{"role": "system", "content": f"Conversation Summary: {summary}"}]
+            self.turn_count = 0 # Reset turn count after successful summarization
+
+        except Exception as e:
+            print(f"❌ Error during summarization: {e}")
+
+    def _apply_truncation(self, mode: str):
+        """Applies truncation based on length or turns."""
+        if mode == 'turns' and self.max_turns and len(self.history) > self.max_turns * 2:
+            # Keep only the last max_turns * 2 messages (user + assistant)
+            self.history = self.history[-(self.max_turns * 2):]
+            print(f"➡️ Truncated history to last {self.max_turns} turns.")
+        
+        if mode == 'chars' and self.max_chars:
+            total_chars = sum(len(msg['content']) for msg in self.history)
+            if total_chars > self.max_chars:
+                # Simple character-based truncation: remove oldest messages until under limit
+                while sum(len(msg['content']) for msg in self.history) > self.max_chars and len(self.history) > 1:
+                    self.history.pop(0)
+                print(f"➡️ Truncated history by character length to under {self.max_chars} characters.")
+
+    def process_conversation(self, user_message: str) -> str:
+        """Sends user message, gets assistant response, manages history, and summarizes."""
+        
+        # 1. Add user message
+        self.add_message("user", user_message)
+
+        # 2. Check for periodic summarization
+        if self.k and self.turn_count % self.k == 0 and self.turn_count > 0:
+            self._summarize_history()
+            
+        # 3. Apply hard truncation limits
+        if self.max_turns:
+            self._apply_truncation('turns')
+        if self.max_chars:
+            self._apply_truncation('chars')
+
+        # 4. Generate assistant response using current history
+        try:
+            response = client.chat.completions.create(
+                model=GROQ_MODEL,
+                messages=self.history,
+                temperature=0.7,
+            )
+            assistant_response = response.choices[0].message.content
+        except Exception as e:
+            assistant_response = f"Sorry, the Groq API encountered an error: {e}"
+
+        # 5. Add assistant response
+        self.add_message("assistant", assistant_response)
+        
+        return assistant_response
+
+# --------------------------------------------------------------------------------------
+# 2. Demonstration
+# --------------------------------------------------------------------------------------
+
+print("## Task 1 Demonstration: Conversation Management & Summarization\n")
+conversation_samples = [
+    "Hi, I'm trying to book a flight for next month.",  # Turn 1
+    "I need a flight from New York to London.",
+    "The dates should be between October 10th and 15th.", # Turn 2
+    "Also, can you tell me the weather in New York today?",
+    "Forget the weather. I need a status update on those London flight options.", # Turn 3 -> Summarize after this turn
+    "The total budget should not exceed $800.", # Turn 4
+    "Please confirm the details and proceed with the booking."
+]
+
+### Demo A: Periodic Summarization (k=3)
+print("### Demo A: Periodic Summarization (k=3)")
+manager_k3 = ConversationManager(k=3)
+
+for i, msg in enumerate(conversation_samples):
+    print(f"\n--- Turn {i+1} / User Message: {msg}")
+    _ = manager_k3.process_conversation(msg)
+    
+    # Display state
+    print(f"Current Turn Count: {manager_k3.turn_count}")
+    print(f"History Length: {len(manager_k3.history)}")
+    
+    if manager_k3.turn_count == 0 and i > 0:
+        print(f"✅ History was successfully summarized and turn count reset at turn {i}")
+        
+print("\nFinal History (k=3):")
+print(json.dumps(manager_k3.get_history(), indent=2))
+print("-" * 50)
+
+
+### Demo B: Truncation by Turns (Max 2 Turns)
+print("\n### Demo B: Truncation by Turns (Max 2 Turns, k=0 (disabled))")
+manager_turns = ConversationManager(k=0, max_turns=2)
+
+for i, msg in enumerate(conversation_samples):
+    print(f"\n--- Turn {i+1} / User Message: {msg}")
+    _ = manager_turns.process_conversation(msg)
+    
+    if len(manager_turns.get_history()) > 4:
+        print(f"History length is {len(manager_turns.get_history())}. Should be max 4 messages (2 turns).")
+
+print("\nFinal History (Max 2 Turns):")
+print(json.dumps(manager_turns.get_history(), indent=2))
+print("-" * 50)
+
+
+### Demo C: Truncation by Character Length (Max 150 Chars)
+print("\n### Demo C: Truncation by Character Length (Max 150 Chars, k=0 (disabled))")
+manager_chars = ConversationManager(k=0, max_chars=150)
+
+for i, msg in enumerate(conversation_samples[:5]): # Use a smaller sample set
+    print(f"\n--- Turn {i+1} / User Message: {msg}")
+    _ = manager_chars.process_conversation(msg)
+    
+    total_chars = sum(len(msg['content']) for msg in manager_chars.get_history())
+    print(f"Current Total History Characters: {total_chars}")
+
+print("\nFinal History (Max 150 Chars):")
+print(json.dumps(manager_chars.get_history(), indent=2))
+print("-" * 50)
